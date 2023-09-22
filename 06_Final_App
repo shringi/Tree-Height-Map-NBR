@@ -1,0 +1,102 @@
+var rh99 = ee.Image("users/ankurshringi/Nav-i-GEE/predicted_tree_height");
+var palettes = require('users/gena/packages:palettes');
+var nbr = require("users/ankurshringi/Nav-i-GEE:utils/nbr");
+var aoi = nbr.Polygon;
+var vis = {"min":10, "max": 20, "palette":palettes.colorbrewer.RdYlGn[9]};
+
+Map.centerObject(rh99.geometry(), 12);
+Map.addLayer(rh99, vis, "Tree Height");
+Map.style().set('cursor', 'crosshair');
+
+// // Ui Panel ---------------------------------------
+// Create an empty panel in which to arrange widgets.
+// The layout is vertical flow by default.
+//App title
+var header = ui.Label('Tree Canopy Height Explorer', {fontSize: '25px', fontWeight: 'bold', color: '4A997E'});
+
+//App summary
+var text = ui.Label(
+  'This tool maps tree height in Nilgiri Biosphere Reserve, India using a Random Forest regression derived from GEDI L2A Product along with SAR (ALOS PALSAR, Sentinel-1) with Optical Landsat-8 imagery. ',
+    {fontSize: '15px'});
+
+var text2 = ui.Label('Click on the Map to check out the tree height for any point on the map.',
+    {fontSize: '15px', fontWeight: 'bold'});
+    
+var panel = ui.Panel({
+  widgets:[header, text, text2],//Adds header and text
+  style:{width: '300px',position:'middle-right'}});
+  
+// var panel = ui.Panel({style: {width: '400px'}})
+//     .add(ui.Label('Click on the map to see tree height'));
+
+// Set a callback function for when the user clicks the map.
+Map.onClick(function(coords) {
+  // Create or update the location label (the second widget in the panel)
+  var location = 'lon: ' + coords.lon.toFixed(3) + ' ' +
+                 'lat: ' + coords.lat.toFixed(3);
+  panel.widgets().set(3, ui.Label(location));
+
+  // Add a red dot to the map where the user clicked.
+  var point = ee.Geometry.Point(coords.lon, coords.lat);
+  Map.layers().set(1, ui.Map.Layer(point, {color: 'FF0000'}));
+  var value = rh99.reduceRegion({
+      reducer: ee.Reducer.first(),
+      geometry: point,
+      scale:30});
+
+  var rh99Point = ee.Number(value.get("predicted")).format("%.2f").evaluate(function(string){
+    panel.widgets().set(4, ui.Label("Tree Height: "+ string + " m", {fontWeight: 'bold', color: 'F47174'}));
+  });
+});
+
+// Add the panel to the ui.root.
+ui.root.add(panel);
+// var vis = {min:1,max:25,palette:['#D77E3F','#B0783B','#C8A65C','#E6D579','#A5BA6F','#6BA264','#3D8A59','#336945','#193E29','#383723','#050503',"#DFE0DB"]}
+
+//style.SetMapStyleGrey()
+
+var nSteps = 12
+
+// Creates a color bar thumbnail image for use in legend from the given color palette
+function makeColorBarParams(palette) {
+  return {
+    bbox: [0, 0, nSteps, 0.1],
+    dimensions: '200x10',
+    format: 'png',
+    min: 0,
+    max: nSteps,
+    palette: palette,
+  };
+}
+
+// Create the colour bar for the legend
+var colorBar = ui.Thumbnail({
+  image: ee.Image.pixelLonLat().select(0).int(),
+  params: makeColorBarParams(vis.palette),
+  style: {stretch: 'horizontal', margin: '0px 8px', maxHeight: '24px',position:'bottom-left'},
+});
+
+// Create a panel with three numbers for the legend
+var legendLabels = ui.Panel({
+  widgets: [
+    ui.Label(vis.min, {margin: '4px 8px'}),
+    ui.Label(
+        ((vis.max-vis.min) / 2+vis.min),
+        {margin: '4px 8px', textAlign: 'center', stretch: 'horizontal'}),
+    ui.Label(vis.max, {margin: '4px 8px'})
+  ],
+  layout: ui.Panel.Layout.flow('horizontal')
+});
+// Legend title
+var legendTitle = ui.Label({
+  value: 'Height (m)',
+  style: {fontWeight: 'bold',position:'bottom-left'}
+});
+
+// Add the legendPanel to the map
+var legendPanel = ui.Panel([legendTitle, colorBar, legendLabels]);
+legendPanel.style().set({
+  position: 'bottom-left',
+  shown: true
+});
+Map.add(legendPanel);
