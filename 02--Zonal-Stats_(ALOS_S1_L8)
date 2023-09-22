@@ -1,0 +1,337 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var table = ee.FeatureCollection("users/ankurshringi/Nav-i-GEE/NBR/100-All_GEDI_Points_with_TimeInfo");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// ╔═══════════╦═══════════════════════════════════════════════════════════╗
+// ║Description║  Getting stats for each GEDI point                        ║
+// ║Author     ║  Ankur Shringi (ankurshringi@iisc.ac.in)                  ║
+// ╚═══════════╩═══════════════════════════════════════════════════════════╝
+// ╭───────────────────────────────────────────────────────────────────────╮
+// │ 00-Functions                                                          │
+// ╰───────────────────────────────────────────────────────────────────────╯
+// Function to append the timestamp information on GEDI Tables
+function addTimeStamp(feature) { 
+    var timeStart = ee.Date(feature.get("time_start"));
+    var timeEnd = ee.Date(feature.get("time_end"));
+    // Adding timestamp properties to the table
+    return feature.set({
+                    'system:time_start': timeStart.millis(),
+                    dayFlag: timeEnd.difference(timeStart,"day")
+                  });
+}
+// Function to mask bad pixels in Landsat-8 
+function maskL8sr(image) {
+  // Bit 0 - Fill
+  // Bit 1 - Dilated Cloud
+  // Bit 2 - Cirrus
+  // Bit 3 - Cloud
+  // Bit 4 - Cloud Shadow
+  var qaMask = image
+      .select('QA_PIXEL')
+      .bitwiseAnd(parseInt('11111', 2))
+      .eq(0);
+  var saturationMask = image
+      .select('QA_RADSAT')
+      .eq(0);
+
+  // Apply the scaling factors to the appropriate bands.
+  var opticalBands = image
+      .select('SR_B.')
+      .multiply(0.0000275)
+      .add(-0.2);
+  
+  var thermalBands = image
+      .select('ST_B.*')
+      .multiply(0.00341802)
+      .add(149.0);
+
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('ndvi')
+
+  // Replace the original bands with the scaled ones and apply the masks.
+  return image
+        .addBands(opticalBands, null, true)
+        .addBands(thermalBands, null, true)
+        .addBands(ndvi, null, true)
+        .updateMask(qaMask)
+        .updateMask(saturationMask)
+        .set('Satellite', 'Landsat8');
+}
+// Function to mask clouds in Sentinel-2
+function maskS2clouds(image) {
+  /**
+ * Function to mask clouds using the Sentinel-2 QA band
+ * @param {ee.Image} image Sentinel-2 image
+ * @return {ee.Image} cloud masked Sentinel-2 image
+ */
+  var qa = image.select('QA60');
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+      
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename(['ndvi']);
+  var mndwi = image.normalizedDifference(['B3', 'B11']).rename(['mndwi']);
+  return image
+        .updateMask(mask)
+        //.divide(10000)
+        .addBands(ndvi, null, true)
+        .addBands(mndwi, null, true)
+        .copyProperties(image, ["system:time_start"])
+        .set('Satellite', 'Sentinel2');
+}
+function add_HV_by_HH_band(image){
+  var new_image = ee.Image(image)
+  var i_ratio = image.select("HV").divide(image.select("HH"))
+  i_ratio = i_ratio.rename("HV_by_HH")
+  new_image = new_image.addBands(i_ratio)
+  return new_image
+}
+function add_VH_by_VV_band(image){
+  var new_image = ee.Image(image)
+  var i_ratio = image.select("VH").divide(image.select("VV"))
+  i_ratio = i_ratio.rename("VH_by_VV")
+  new_image = new_image.addBands(i_ratio)
+  
+  return new_image
+}
+// Function to buffer GEDI footprint point to a circle
+function bufferPoints(radius, bounds) {
+  return function(pt) {
+    pt = ee.Feature(pt)
+    .set("long", ee.Number(pt.geometry().coordinates().get(0)))
+    .set("lat", ee.Number(pt.geometry().coordinates().get(1)));
+    return bounds ? pt.buffer(radius).bounds() : pt.buffer(radius);
+  };
+}
+// Temporal Zonal Stats
+function extractAndComputeMean(feature) {
+  var meanImageALOS = ee.ImageCollection.fromImages(feature.get('alos_list'))
+    .reduce(ee.Reducer.mean().setOutputs(['ALOS_mean']));
+  var meanImageL8 = ee.ImageCollection.fromImages(feature.get('l8_list'))
+    .reduce(ee.Reducer.mean().setOutputs(['L8_mean']));
+  var meanImageS1_Asc = ee.ImageCollection.fromImages(feature.get('s1Asc_list'))
+    .reduce(ee.Reducer.mean().setOutputs(['S1_Asc_mean']));
+  var meanImageS1_Dsc = ee.ImageCollection.fromImages(feature.get('s1Dsc_list'))
+    .reduce(ee.Reducer.mean().setOutputs(['S1_Dsc_mean']));
+  // var medianImageS2 = ee.ImageCollection.fromImages(feature.get('s2_list'))
+  //   .reduce(ee.Reducer.median().setOutputs(['S2_med']));
+
+  var imageCombined = ee.Image.cat(meanImageALOS,
+      // meanImageS1_Asc,
+      meanImageS1_Dsc,
+      meanImageL8)
+      // medianImageS2)
+      .copyProperties(feature, ["system:time_start"]);
+      
+  var buffered = ee.FeatureCollection(
+      ee.List(feature.get('monthlyGroup')))
+      .map(bufferPoints(12.5, false));
+      
+
+
+  var updated_buffer_points = buffered.map(function(feature){
+    return ee.Feature(ee.Geometry.Point([feature.get("long"), feature.get("lat")]), 
+      ee.Image(imageCombined)
+        .reduceRegion({
+          reducer: ee.Reducer.mean(),
+          geometry: feature.geometry(),
+          scale:30
+        }))
+      .copyProperties(feature);
+  });
+  return updated_buffer_points;
+}
+
+// Find a convex hull around all points from a month
+function addConvHull(ym) {
+  var ymPts = ee.FeatureCollection(ee.List(ym.get('monthlyGroup')));
+  // print(ymPts.limit(10), 'ymPts')
+  var ymPtsConvHull = ee.Feature(ymPts.union(10).first()).convexHull();
+  return ym.set('convHull', ymPtsConvHull.geometry());
+}
+
+// ╭───────────────────────────────────────────────────────────────────────╮
+// │ 01-Imports                                                            │
+// ╰───────────────────────────────────────────────────────────────────────╯
+var NBR = require("users/ankurshringi/Nav-i-GEE:utils/nbr");
+
+// NBR Outline
+var aoi = NBR.Polygon;
+var gediPropsToKeepInExport = [
+  'rh0', 'rh5', 'rh25', 'rh50', 'rh75', 'rh95', 'rh99', 'rh100', 'doy',
+  'beam','elevation_bias_flag', 'digital_elevation_model_srtm',
+  'elev_highestreturn', 'elev_lowestmode', 'energy_total',
+  'num_detectedmodes', 'selected_algorithm', 'solar_elevation',
+  'ptid', 'sensitivity', 
+  'system:time_start', 'yearMonthMillis', 'yearMonth']; // this system:time_start is timestamp of yearMonth
+
+// var gediPoints = ee.FeatureCollection("users/pradeepkoulgi/GEDI_points_NBR_minFilt_yrmntday_dateOverwritten")
+//   .select(gediPropsToKeepInExport).limit(1000);
+var gediPoints = ee.FeatureCollection("users/ankurshringi/Nav-i-GEE/NBR/100-All_GEDI_Points_with_TimeInfo")
+  .select(gediPropsToKeepInExport);
+//print(gediPoints.limit(2))
+
+var ptsDistinctYearMonth = gediPoints
+  .select(['yearMonth', 'yearMonthMillis', 'system:time_start'])
+  .distinct('yearMonth');
+// print(ptsDistinctYearMonth, 'ptsDistinctYearMonth')
+print(ptsDistinctYearMonth.size(), 'ptsDistinctYearMonth size');
+
+// group points by month
+var filterByYearMonth = ee.Filter.equals({
+  leftField: 'yearMonth', 
+  rightField: 'yearMonth'});
+var gediPtsGroupedByMonth = ee.Join.saveAll('monthlyGroup').apply({
+    primary: ptsDistinctYearMonth,
+    secondary: gediPoints,
+    condition: filterByYearMonth
+});
+
+// create and store a convex hull around all points within a month.
+// use this geometry to filter images
+var gediPtsGroupedByMonth_convexHullAdded = gediPtsGroupedByMonth.map(addConvHull);
+// print(gediPtsGroupedByMonth_convexHullAdded, 'gediPtsGroupedByMonth_convexHullAdded')
+
+// ╭───────────────────────────────────────────────────────────────────────╮
+// │ 03-Getting date range from GEDI (For temporal filtering               │
+// ╰───────────────────────────────────────────────────────────────────────╯  
+var range = gediPoints.reduceColumns(ee.Reducer.minMax(), ["system:time_start"]);
+var dateGediFirst = ee.Date(range.get('min'));
+var dateGediLast = ee.Date(range.get('max'));
+// print('Date range (GEDI): ', dateGediFirst, dateGediLast);
+var days = 45;
+var dateFilterFirst = dateGediFirst.advance(-days, "days");
+var dateFilterLast = dateGediLast.advance(days, "days");
+// ╭───────────────────────────────────────────────────────────────────────╮
+// │ 04-Importing various satellite imagery as an ImageCollection          │
+// ╰───────────────────────────────────────────────────────────────────────╯
+//     ╭───────────────────────────────────────────────────────────────────╮
+//     │ 04a-ALOS                                                          │
+//     ╰───────────────────────────────────────────────────────────────────╯
+        var ALOS = ee.ImageCollection('JAXA/ALOS/PALSAR-2/Level2_2/ScanSAR')
+            .select(['HH', 'HV'])
+            .filterBounds(aoi)
+            .filterDate(dateFilterFirst, dateFilterLast)
+            .map(add_HV_by_HH_band);
+        // print(ALOS.limit(10), 'alos')
+//     ╭───────────────────────────────────────────────────────────────────╮
+//     │ 04b-Sentinel-1                                                    │
+//     ╰───────────────────────────────────────────────────────────────────╯
+        // Filter the Sentinel-1 collection by metadata properties.
+        var S1_Iw = ee.ImageCollection('COPERNICUS/S1_GRD')
+            .select(['VH', 'VV', 'angle'])
+            .filterBounds(aoi)
+            .filterDate(dateFilterFirst, dateFilterLast)
+            // Filter to get images with VV and VH dual polarization.
+            .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+            .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+            // Filter to get images collected in interferometric wide swath mode.
+            .filter(ee.Filter.eq('instrumentMode', 'IW'));
+        // print(S1_Iw.limit(10), 's1 all')
+        // Separate ascending and descending orbit images into distinct collections.
+        //var S1_Iw_Asc = S1_Iw.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+        var S1_Iw_Dsc = S1_Iw.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'))
+        .map(add_VH_by_VV_band);
+//     ╭───────────────────────────────────────────────────────────────────╮
+//     │ 04c-Sentinel-2                                                    │
+//     ╰───────────────────────────────────────────────────────────────────╯
+        var S2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+            .select(['B3', 'B4', 'B8', 'B11', 'QA60'])
+            .filterBounds(aoi)
+            .filterDate(dateFilterFirst, dateFilterLast)
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+            .map(maskS2clouds);
+//     ╭───────────────────────────────────────────────────────────────────╮
+//     │ 04c-Landsat-8                                                     │
+//     ╰───────────────────────────────────────────────────────────────────╯
+        var L8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+            .select(['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7',
+                     'ST_B10', 'QA_PIXEL', 'QA_RADSAT'])
+            .filterBounds(aoi)
+            .filterDate(dateFilterFirst, dateFilterLast)
+            .map(maskL8sr);
+//      print('Landsat 8', L8);
+// ╭───────────────────────────────────────────────────────────────────────╮
+// │ 05-Temporal join other images to GEDI                                 │
+// ╰───────────────────────────────────────────────────────────────────────╯
+var millis = ee.Number(days).multiply(1000*60*60*24);
+
+// find all images within the window
+var maxDiffFilter = ee.Filter.maxDifference({
+  difference: millis,
+  leftField: 'yearMonthMillis',
+  rightField: 'system:time_start'
+});
+
+// find images that match spatially with the location. 
+var geomFilter = ee.Filter.intersects({
+  leftField: 'convHull', // convex hull around all points in a month
+  rightField: '.geo',
+  maxError: 0.1
+});
+
+// Apply joins sequentially and step-wise accumulate 
+// all images, with images from satellite available 
+// as a list in a separate property (avoids 
+// having to filter again within map in extract lmean stage).
+var filter = ee.Filter.and(maxDiffFilter, geomFilter);
+
+// First, join ALOS ... 
+var gediWithALOS = ee.Join.saveAll({matchesKey: 'alos_list', outer: true}).apply({ // retain those without matches also
+  primary: gediPtsGroupedByMonth_convexHullAdded,
+  secondary: ALOS,
+  condition: filter
+});
+// .. to that, add S1 descending ...
+var gediWithALOSAndS1Dsc = ee.Join.saveAll({matchesKey: 's1Dsc_list', outer: true}).apply({
+  primary: gediWithALOS,
+  secondary: S1_Iw_Dsc,
+  condition: filter
+});
+// .. to that, add S1 ascending ...
+// var gediWithALOSAndS1DscAndS1Asc = ee.Join.saveAll({matchesKey: 's1Asc_list', outer: true}).apply({
+//   primary: gediWithALOSAndS1Dsc,
+//   secondary: S1_Iw_Asc,
+//   condition: filter
+// });
+// // .. to that, add S2 ...
+// var gediWithALOSAndS1DscAndS1AscAndS2 = ee.Join.saveAll({matchesKey: 's2_list', outer: true}).apply({
+//   primary: gediWithALOSAndS1DscAndS1Asc,
+//   secondary: S2,
+//   condition: filter
+// });
+// .. and finally, to that, add L8.
+var joinedGedi = ee.Join.saveAll({matchesKey: 'l8_list', outer: true}).apply({
+  primary: gediWithALOSAndS1Dsc,
+  secondary: L8,
+  condition: filter
+});
+
+// var joinedGedi = gediWithALOSAndS1Dsc;
+print(joinedGedi.limit(2), 'joinedGedi');
+
+var gediAllYears = ee.FeatureCollection(
+  joinedGedi.map(extractAndComputeMean, false))
+  .flatten();
+
+print(gediAllYears.limit(2), 'gediAllYears');
+
+Export.table.toAsset({
+  collection: gediAllYears,
+  description: 'FC_201_Zonal_Stats_NBR_ALOS_S1_L8',
+  assetId: 'users/ankurshringi/Nav-i-GEE/NBR/FC_201_Zonal_Stats_NBR_ALOS_S1_L8'
+  });
+
+//Export to csv
+
+// var regTable = ee.FeatureCollection("users/ankurshringi/Nav-i-GEE/NBR/FC_201_Zonal_Stats_NBR_ALOS_S1_L8");
+
+// Export.table.toDrive({
+//   collection: regTable.select(['.*'],null,false),
+//   description:'FC_201_Zonal_Stats_NBR_ALOS_S1_L8',
+//   folder: 'GEE-Export',
+//   fileFormat: 'CSV'
+// });
