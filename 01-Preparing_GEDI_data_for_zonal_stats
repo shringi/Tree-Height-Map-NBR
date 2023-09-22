@@ -1,0 +1,50 @@
+// ╭───────────────────────────────────────────────────────────────────────╮
+// │ 01-Imports                                                            │
+// ╰───────────────────────────────────────────────────────────────────────╯
+// Functions and assets
+var gedi = require("users/ankurshringi/Nav-i-GEE:utils/gedi");
+var NBR = require("users/ankurshringi/Nav-i-GEE:utils/nbr");
+
+// NBR Outline
+var aoi = NBR.Polygon;
+
+// // GEDI Tables for the aoi              
+var gediTableList = ee.FeatureCollection("LARSE/GEDI/GEDI02_A_002_INDEX")
+    .filterBounds(aoi)
+    .map(gedi.addTimeStamp);
+    
+//print("Number of GEDI Tables with in NBR", gediTableList.size());    
+
+// ╭───────────────────────────────────────────────────────────────────────╮
+// │ 02-Gathering all GEDI footprints within aoi into a single table       │
+// ╰───────────────────────────────────────────────────────────────────────╯    
+var gediTables = gediTableList.map(gedi.getTablesInfo);
+
+// // Aggregate all the ids and their timestamps
+var gediDict = ee.Dictionary({
+    ptid: gediTables.aggregate_array("ptid"),
+    'system:time_start': gediTables.aggregate_array("system:time_start"),
+    }).getInfo();
+
+// ╭───────────────────────────────────────────────────────────────────────╮
+// │ 03-Gathering all GEDI footprints as points                            │
+// ╰───────────────────────────────────────────────────────────────────────╯    
+var gediPoints = ee.FeatureCollection([]);
+for (var i = 0; i < gediDict.ptid.length; i++) {
+  // client side loop to gather all the points into a single featurecollection
+  var sysTime = gediDict['system:time_start'][i];
+  var ptid = gediDict.ptid[i];
+  //print(ptid)
+  var temp = ee.FeatureCollection(ee.FeatureCollection(gediDict.ptid[i])
+            .filterBounds(aoi)
+            .filter(ee.Filter.eq('degrade_flag', 0))
+            .filter(ee.Filter.eq('quality_flag', 1)))
+            .map(gedi.addProperties(sysTime, ptid));
+  gediPoints = gediPoints.merge(temp);
+}
+
+Export.table.toAsset({
+  collection: gediPoints,
+  description: '100_Preparing_GEDI_data_for_zonal_stats_PK',
+  assetId: 'users/ankurshringi/Nav-i-GEE/NBR/100-All_GEDI_Points_with_TimeInfo',
+  });
