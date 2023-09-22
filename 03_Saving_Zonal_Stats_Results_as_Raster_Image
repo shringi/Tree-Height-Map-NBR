@@ -1,0 +1,60 @@
+var util = require("users/ankurshringi/Nav-i-GEE:utils/util");
+var nbr = require("users/ankurshringi/Nav-i-GEE:utils/nbr");
+var aoi = nbr.Polygon;
+
+var regTable = ee.FeatureCollection("users/ankurshringi/Nav-i-GEE/NBR/200_Zonal_Stats_NBR_SAR");
+
+var buffered = regTable.map(util.bufferPoints(12.5, false));
+var properties = ee.List(buffered.first().propertyNames())
+    .remove("system:index")
+    .remove("shot_number")
+    .remove("ptid")
+    .remove("yearMonth")
+    .replace("system:time_start", "timeStart")
+    .replace("HV/HV_ALOS_mean", "HV_by_HH_ALOS_mean")
+    .replace("VH/VV_S1_Dsc_mean", "VH_by_VV_S1_Dsc_mean");
+
+var img_list = ee.Image(properties.map(function(property) {
+  return buffered.select([property])
+    .reduceToImage([property], ee.Reducer.first())
+    .rename([property]);
+}));
+
+var mergeBands = function(image, previous) {
+  return ee.Image(previous).addBands(image);
+};
+
+// Merge bands
+var image = ee.Image(ee.ImageCollection.fromImages(img_list).iterate(mergeBands, ee.Image([])));
+
+Export.image.toAsset({
+  image: image,
+  description: '210_Saving_Zonal_Stats_Results_as_Raster_Image',
+  assetId: 'users/ankurshringi/Nav-i-GEE/NBR/Image_210_Saving_Zonal_Stats_Results_as_Raster_Image',  // <> modify these
+  region: aoi,
+  scale: 25, //sqrt(2)*12.5
+  crs: 'EPSG:4326',
+  pyramidingPolicy: 'mode',
+  maxPixels: 10e8,
+});
+// Optional---------------------------------------------
+
+// Export to CSV
+// Export.table.toDrive({
+//   collection: regTable.select(['.*'],null,false),
+//   description:'200_Zonal_Stats_NBR_SAR_CSV',
+//   folder: 'GEE-Export',
+//   fileFormat: 'CSV'
+// });
+
+// // Checking Whether the export is making sense
+// Map.centerObject(regTable.geometry().bounds(),10)
+// Map.addLayer(regTable,{},"Table")
+
+
+// Checking bufferPoint Function is working or not
+// var bf = ee.FeatureCollection(regTable.limit(2)).map(util.bufferPoints(12.5, false)).limit(1)
+// Map.centerObject(bf.geometry(),19);
+// Map.addLayer(bf,{},"bf");
+
+// print(properties)
