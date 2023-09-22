@@ -1,0 +1,111 @@
+var nbr = require("users/ankurshringi/Nav-i-GEE:utils/nbr");
+var palettes = require('users/gena/packages:palettes');
+var gedi = ee.Image("users/ankurshringi/Nav-i-GEE/NBR/Image_210_Saving_Zonal_Stats_Results_as_Raster_Image");
+// functions--------------------------------------------
+var add_HV_by_HH_band = function(image){
+  var new_image = ee.Image(image);
+  var i_ratio = image.select("HV").divide(image.select("HH"));
+  i_ratio = i_ratio.rename("HV_by_HH");
+  new_image = new_image.addBands(i_ratio);
+  return new_image;
+};
+var add_VH_by_VV_band = function(image){
+  var new_image = ee.Image(image);
+  var i_ratio = image.select("VH").divide(image.select("VV"));
+  i_ratio = i_ratio.rename("VH_by_VV");
+  new_image = new_image.addBands(i_ratio);
+  return new_image;
+};
+
+// NBR Shapefile----------------------------------------
+var aoi = nbr.Polygon;
+
+// Importing Images---------------------------------------
+var dateRange = ee.DateRange('2019-05-22', '2022-11-13');
+
+var BandsALOS = ee.List(["HH", "HV", "HV_by_HH"]);
+
+var meanImageALOS = ee.ImageCollection('JAXA/ALOS/PALSAR-2/Level2_2/ScanSAR')
+    .filterBounds(aoi)
+    .filterDate(dateRange)
+    .map(add_HV_by_HH_band)
+    .mean()
+    .select(BandsALOS)
+    .rename(ee.List(["HH_ALOS_mean", "HV_ALOS_mean", "HV_by_HH_ALOS_mean"]));
+//print(meanImageALOS);
+
+var BandsS1DSc = ee.List(["VV", "VH", "angle", "VH_by_VV"]);
+var meanImageS1_Iw_Dsc = ee.ImageCollection('COPERNICUS/S1_GRD')
+    .filterBounds(aoi)
+    .filterDate(dateRange)
+    // Filter to get images with VV and VH dual polarization.
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+    // Filter to get images collected in interferometric wide swath mode.
+    .filter(ee.Filter.eq('instrumentMode', 'IW'))
+    .filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'))
+    .map(add_VH_by_VV_band)
+    .mean()
+    .select(BandsS1DSc)
+    .rename(ee.List(["VV_S1_Dsc_mean", "VH_S1_Dsc_mean",
+    'angle_S1_Dsc_mean', "VH_by_VV_S1_Dsc_mean"]));
+
+var image_ALOS_S1 = ee.Image.cat(meanImageALOS, meanImageS1_Iw_Dsc);
+var rh99lt40 = gedi.select('rh99').updateMask(gedi.select('rh100').lt(40));
+var rh99gt40 = gedi.select('rh99').updateMask(gedi.select('rh100').gt(40));
+var rh05lt40 = gedi.select('rh5').updateMask(gedi.select('rh100').lt(40));
+//print(meanImageS1_Iw_Dsc);
+// Visualisation parameter-------------------------------------
+var visALOS = {"opacity":1,
+    "bands":["HV_by_HV_ALOS_mean"],
+    "min":0.3,
+    "max":0.6,
+    "palette":palettes.matplotlib.viridis[7]};
+var visS1 = {"opacity":1,
+    "bands":["VH_by_VV_S1_Dsc_mean"],
+    "min":-5,
+    "max":10,
+    "gamma":0.75};
+var visS1_RGB = {
+    "opacity": 1,
+    "bands": ["VV_S1_Dsc_mean", "VH_S1_Dsc_mean", "VH_by_VV_S1_Dsc_mean"],
+    "min": [-25,-30,0],
+    "max": [-5,-10,10],
+    "gamma": [1,1,1]
+};
+var visALOS_RGB = {
+    "opacity": 1,
+    "bands": ["HH_ALOS_mean", "HV_ALOS_mean", "HV_by_HH_ALOS_mean"],
+    "min": [4715, 2183, 0.3],
+    "max": [5779, 3149,  0.6],
+    "gamma": [1,1,1]
+};
+var visTC = {"opacity":1,"bands":["rh100_Pred"],"min":0,"max":30,"palette":palettes.colorbrewer.RdYlGn[9]};    
+var visrh99_lt40 = {"bands": 'rh99', "min": 0,  "max":  40, palette: palettes.colorbrewer.RdYlGn[9]};
+var visrh99_gt40 = {"bands": 'rh99', "min": 40, "max": 100, palette: palettes.colorbrewer.Reds[5]};
+var visrh99_RGB  = {"bands": ['rh25', 'rh50', 'rh75'], "min": 5, "max": 35};
+var visGEDI_modes = {"bands": 'num_detectedmodes', "min": 0, "max": 10, palette: palettes.colorbrewer.Spectral[10].reverse()};
+var visrh05_lt40 = {"bands": 'rh5', "min": -5, "max": 5, palette: palettes.colorbrewer.Spectral[11]};
+
+// Display various layers---------------------------------------
+Map.centerObject(aoi, 8);
+Map.addLayer(aoi, {}, "NBR", 0);
+Map.addLayer(image_ALOS_S1.clip(aoi), visALOS_RGB, "ALOS (RGB)", 1);
+Map.addLayer(image_ALOS_S1.clip(aoi), visS1_RGB, 'S1 DSc (RGB)', 0);
+Map.addLayer(rh99lt40, visrh99_lt40, "rh99 <40",0);
+Map.addLayer(rh99gt40, visrh99_gt40, "rh99 >40",0);
+Map.addLayer(rh05lt40, visrh05_lt40, "rh5",0);
+Map.addLayer(gedi.updateMask(gedi.select('rh100').lt(40)), visrh99_RGB,  "GEDI (RGB)",0);
+Map.addLayer(gedi.updateMask(gedi.select('rh100').lt(40)), visGEDI_modes,"GEDI Profile Modes",0);
+
+// Export-------------------------------------------------------
+Export.image.toAsset({
+  image: image_ALOS_S1,
+  description: 'Image_220_Saving_ALOS_S1_Composite_for_Pred',
+  assetId: 'users/ankurshringi/Nav-i-GEE/NBR/Image_220_Saving_ALOS_S1_Composite_for_Pred',  // <> modify these
+  region: aoi,
+  scale: 10, 
+  crs: 'EPSG:4326',
+  pyramidingPolicy: 'mean',
+  maxPixels: 10e8,
+});
