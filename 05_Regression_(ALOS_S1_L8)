@@ -1,0 +1,76 @@
+//Imports
+var palettes = require('users/gena/packages:palettes');
+var nbr = require("users/ankurshringi/Nav-i-GEE:utils/nbr");
+var aoi = nbr.Polygon;
+
+var dataRaw = ee.FeatureCollection("users/ankurshringi/Nav-i-GEE/NBR/FC_201_Zonal_Stats_NBR_ALOS_S1_L8");
+//print("Column Names", dataRaw.first().propertyNames());
+var selectedCols = ee.List(['rh99', 
+            'VV_S1_Dsc_mean', 'VH_S1_Dsc_mean', 'VH_by_VV_S1_Dsc_mean', 'angle_S1_Dsc_mean',
+            'HV_ALOS_mean', 'HH_ALOS_mean', 'HV_by_HH_ALOS_mean', 
+            'doy',
+            'SR_B2_L8_mean', 'SR_B3_L8_mean', 'SR_B4_L8_mean', 'SR_B5_L8_mean', 
+            'SR_B6_L8_mean', 'SR_B7_L8_mean', 
+            'ndvi_L8_mean']);
+// print(selectedCols)
+
+var dataSelected = dataRaw
+    .select(selectedCols)
+    .filter(ee.Filter.notNull(selectedCols))
+    .filter(ee.Filter.lt("rh99", 40))
+    .randomColumn({seed: 134})
+    .limit(100000);
+
+    
+//print(dataSelected.first().propertyNames());
+var trainSubset = dataSelected.filter(ee.Filter.lt('random', 0.75));//.aside(print, 'train subset');
+var testSubset = dataSelected.filter(ee.Filter.gte('random', 0.75));//.aside(print, 'test subset');
+// print(trainSubset.size()) 
+var classifier = ee.Classifier.smileGradientTreeBoost(200)
+    .train({
+      features: trainSubset, 
+      classProperty: 'rh99', 
+      inputProperties: selectedCols//.aside(print, 'bands to train and test on')
+    })
+    .setOutputMode('REGRESSION');
+
+//print(classifier)
+print(classifier.explain())
+var predTrain = trainSubset.classify(classifier, "rh99_Pred");
+var predTest = testSubset.classify(classifier, "rh99_Pred");
+
+var resultTrain = predTrain.limit(1000);
+var yPred = ee.List(resultTrain.aggregate_array("rh99_Pred"));
+var x = ee.List(resultTrain.aggregate_array("rh99"));
+var chartTrain = ui.Chart.array.values({
+  array: yPred,
+  axis: 0,
+  xLabels: x,
+}).setChartType('LineChart').setOptions({
+  title: 'Array Plot',
+  hAxis: { title: 'Height GEDI (Train)' },
+  vAxis: { title: 'Height Predicted (Train)' },
+  trendlines: { 0: 
+                  {type: 'linear', 
+                  showR2: true,
+                  visibleInLegend: true}}
+});
+// print(chartTrain);
+
+var resultTrain = predTest.limit(1000);
+var yPred = ee.List(resultTrain.aggregate_array("rh99_Pred"));
+var x = ee.List(resultTrain.aggregate_array("rh99"));
+var chartTest = ui.Chart.array.values({
+  array: yPred,
+  axis: 0,
+  xLabels: x,
+}).setChartType('LineChart').setOptions({
+  title: 'Array Plot',
+  hAxis: { title: 'Height GEDI (Test)' },
+  vAxis: { title: 'Height Predicted (Test)' },
+  trendlines: { 0: 
+                  {type: 'linear', 
+                  showR2: true,
+                  visibleInLegend: true}}
+});
+//print(chartTest);
